@@ -74,9 +74,7 @@ USER_AGENT: str = (
 # Pre-compiled regexes used across parsers.
 _TRAIN_LINK_RE: re.Pattern[str] = re.compile(r"train\.php\?tid=(\d+)", re.IGNORECASE)
 _TRAIN_NUMBER_RE: re.Pattern[str] = re.compile(r"(\d+)\s*-\s*(.+)", re.DOTALL)
-_TIME_RE: re.Pattern[str] = re.compile(
-    r"^\s*\d{1,2}[:/]\d{2}\s*(AM|PM)\s*$", re.IGNORECASE
-)
+_TIME_RE: re.Pattern[str] = re.compile(r"^\s*\d{1,2}[:/]\d{2}\s*(AM|PM)\s*$", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # Key generation
@@ -283,9 +281,7 @@ def _find_train_block(anchor: Tag) -> Optional[Tag]:
     if not m:
         return None
     tid: str = m.group(1)
-    pat: re.Pattern[str] = re.compile(
-        rf"train\.php\?tid={re.escape(tid)}(?:&|$)", re.IGNORECASE
-    )
+    pat: re.Pattern[str] = re.compile(rf"train\.php\?tid={re.escape(tid)}(?:&|$)", re.IGNORECASE)
     for parent in anchor.parents:
         if not isinstance(parent, Tag):
             continue
@@ -627,19 +623,14 @@ class RdmnsClient:
             SessionExpiredError: If the response contains ``SESSION OUT``.
             requests.HTTPError: On HTTP errors.
         """
-        dt: str = (
-            travel_date.isoformat()
-            if isinstance(travel_date, date)
-            else str(travel_date)
-        )
+        dt: str = travel_date.isoformat() if isinstance(travel_date, date) else str(travel_date)
 
         self._http.cookies.set("selectedOption", str(from_id), domain="radar.hesn.xyz")
         self._http.cookies.set("selectedOption2", str(to_id), domain="radar.hesn.xyz")
 
         key = generate_api_key()
         referer = (
-            f"{BASE_URL}/app/n_timetablenew.php"
-            f"?did={self.device_id}&key={key}&lan={self.lang}"
+            f"{BASE_URL}/app/n_timetablenew.php?did={self.device_id}&key={key}&lan={self.lang}"
         )
         params: dict[str, str] = {
             "frm": str(from_id),
@@ -648,9 +639,7 @@ class RdmnsClient:
             "tonm": to_name,
             "dt": dt,
         }
-        log.debug(
-            "search frm=%s to=%s date=%s", from_id, to_id, dt
-        )
+        log.debug("search frm=%s to=%s date=%s", from_id, to_id, dt)
         resp = self._http.get(
             f"{BASE_URL}/app/timetablesearch.php",
             params=params,
@@ -660,15 +649,11 @@ class RdmnsClient:
 
         html = resp.text or ""
         if "SESSION OUT" in html.upper():
-            raise SessionExpiredError(
-                "Search returned SESSION OUT.  Call bootstrap() first."
-            )
+            raise SessionExpiredError("Search returned SESSION OUT.  Call bootstrap() first.")
 
         trains = parse_search_results(html)
         if not trains:
-            raise NoTrainsFound(
-                f"No trains found for {from_name} → {to_name} on {dt}."
-            )
+            raise NoTrainsFound(f"No trains found for {from_name} → {to_name} on {dt}.")
         return trains
 
     def get_details(self, tid: int) -> TrainDetail:
@@ -692,7 +677,5 @@ class RdmnsClient:
         )
         html = resp.text or ""
         if "SESSION OUT" in html.upper():
-            raise SessionExpiredError(
-                "Details returned SESSION OUT.  Call bootstrap() first."
-            )
+            raise SessionExpiredError("Details returned SESSION OUT.  Call bootstrap() first.")
         return parse_train_detail(html, tid=tid)

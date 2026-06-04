@@ -79,8 +79,26 @@ DEVICE_ID: str = os.environ.get("RDMNS_DEVICE_ID", "8b8c5ba96f2d5f5a")
 
 #: Popular stations shown in the quick-pick keyboard (subset of the full list).
 _POPULAR_STATION_IDS: Final[set[int]] = {
-    500, 501, 503, 505, 507, 42, 46, 50, 51, 83,
-    305, 312, 254, 280, 360, 352, 167, 502, 205, 210,
+    500,
+    501,
+    503,
+    505,
+    507,
+    42,
+    46,
+    50,
+    51,
+    83,
+    305,
+    312,
+    254,
+    280,
+    360,
+    352,
+    167,
+    502,
+    205,
+    210,
 }
 
 #: Full station map: name → Station, populated at bootstrap.
@@ -96,9 +114,8 @@ def _load_stations(stations: list[Station]) -> None:
     global _all_stations, _popular_names, _all_station_names
     _all_stations = {s.name: s for s in stations}
     _all_station_names = sorted(_all_stations)
-    _popular_names = sorted(
-        [s.name for s in stations if s.sid in _POPULAR_STATION_IDS]
-    )
+    _popular_names = sorted([s.name for s in stations if s.sid in _POPULAR_STATION_IDS])
+
 
 # ---------------------------------------------------------------------------
 # Telethon client + shared RDMNS client
@@ -134,19 +151,44 @@ _session_ready: bool = False
 # ---------------------------------------------------------------------------
 
 
-def _station_keyboard() -> list[list[Button]]:
-    """Build a 3-column inline keyboard for popular stations.
+_STATIONS_PER_PAGE: Final[int] = 30
+"""Number of station buttons shown per page (10 rows × 3 columns)."""
+
+
+def _station_keyboard(page: int = 0) -> list[list[Button]]:
+    """Build a paginated 3-column inline keyboard of all stations.
+
+    Args:
+        page: Zero-based page index.
 
     Returns:
         Nested list of :class:`Button` rows accepted by Telethon's ``buttons``
-        parameter.
+        parameter, with navigation buttons appended when applicable.
     """
-    names = _popular_names or _all_station_names
+    names = _all_station_names or _popular_names
+    total = len(names)
+    if total == 0:
+        return []
+
+    total_pages = (total + _STATIONS_PER_PAGE - 1) // _STATIONS_PER_PAGE
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * _STATIONS_PER_PAGE
+    end = min(start + _STATIONS_PER_PAGE, total)
+    page_names = names[start:end]
+
     rows: list[list[Button]] = []
-    for i in range(0, len(names), 3):
-        rows.append(
-            [Button.inline(n, data=f"st:{n}") for n in names[i : i + 3]]
-        )
+    for i in range(0, len(page_names), 3):
+        rows.append([Button.inline(n, data=f"st:{n}") for n in page_names[i : i + 3]])
+
+    nav: list[Button] = []
+    if page > 0:
+        nav.append(Button.inline("⬅️ Prev", data=f"stp:{page - 1}"))
+    nav.append(Button.inline(f"{page + 1}/{total_pages}", data="stp:noop"))
+    if page < total_pages - 1:
+        nav.append(Button.inline("Next ➡️", data=f"stp:{page + 1}"))
+    rows.append(nav)
+
     return rows
 
 
@@ -171,31 +213,44 @@ def _date_keyboard() -> list[list[Button]]:
     return rows
 
 
+def _train_type_emoji(train_type: str) -> str:
+    """Map a train type string to a fitting emoji."""
+    t = train_type.strip().lower()
+    if "intercity" in t or "express" in t:
+        return "🚅"
+    if "slow" in t or "stopping" in t:
+        return "🚃"
+    if "night" in t:
+        return "🌙"
+    return "🚆"
+
+
 def _train_list_keyboard(trains: list[TrainSummary]) -> list[list[Button]]:
-    """Build an inline keyboard where each row is one train from a search result.
+    """Build an inline keyboard with rich per-train buttons.
 
-    Args:
-        trains: List of :class:`TrainSummary` to display (capped at 15).
-
-    Returns:
-        Nested list of :class:`Button` rows, with a "New search" button appended.
+    Each button packs departure → arrival, duration, type emoji, and train
+    number into a single tap-friendly row — no separate text block needed.
     """
     rows: list[list[Button]] = []
     for t in trains[:15]:
-        label = f"{t.depart_time or '?'}  {t.headline or t.train_number or str(t.tid)}"
+        emoji = _train_type_emoji(t.train_type)
+        time_range = f"{t.depart_time}→{t.arrive_time}" if t.depart_time else "—"
+        dur = f" {t.duration}" if t.duration else ""
+        num = f" #{t.train_number}" if t.train_number else ""
+        label = f"{emoji} {time_range}{dur}{num}"
         rows.append([Button.inline(label[:50], data=f"tid:{t.tid}")])
-    rows.append([Button.inline("🔄 New search", data="cmd:search")])
+    rows.append([Button.inline("🔍 New search", data="cmd:search")])
     return rows
 
 
 def _detail_buttons(tid: int) -> list[list[Button]]:
     """Build the inline keyboard shown below a train detail message."""
     return [
+        [Button.inline("🔄 Refresh", data=f"ref:{tid}")],
         [
-            Button.inline("🔄 Refresh", data=f"ref:{tid}"),
-            Button.inline("◀ Back to list", data="cmd:back"),
+            Button.inline("◀️ Back to list", data="cmd:back"),
             Button.inline("🔍 New search", data="cmd:search"),
-        ]
+        ],
     ]
 
 
@@ -210,68 +265,52 @@ def _fmt_train_list(
     to_name: str,
     travel_date: date,
 ) -> str:
-    """Format a numbered train list as a Markdown string.
-
-    Args:
-        trains: Search results to render (capped at 15).
-        from_name: Origin station display name.
-        to_name: Destination station display name.
-        travel_date: The queried travel date.
-
-    Returns:
-        Multi-line Markdown-formatted string.
-    """
-    header = (
+    """Format a compact train-list header (the details live in the buttons)."""
+    return (
         f"🚉 **{from_name} → {to_name}**\n"
-        f"📅 {travel_date.strftime('%A, %d %B %Y')}  —  {len(trains)} train(s)\n\n"
+        f"📅 {travel_date.strftime('%a, %d %b %Y')}  ·  "
+        f"{len(trains)} train{'s' if len(trains) != 1 else ''}\n\n"
+        "👇 Tap a train for its full schedule"
     )
-    lines: list[str] = []
-    for i, t in enumerate(trains[:15], start=1):
-        headline = t.headline or f"Train {t.tid}"
-        num_type = f"#{t.train_number} {t.train_type}".strip()
-        time_part = (
-            f"  🕐 {t.depart_time} → {t.arrive_time}" if t.depart_time else ""
-        )
-        dur = f"  ({t.duration})" if t.duration else ""
-        lines.append(f"**{i}.** {headline}\n    {num_type}{time_part}{dur}")
-    return header + "\n\n".join(lines) + "\n\n_Tap a train to see its full schedule._"
 
 
 def _fmt_train_detail(detail: TrainDetail) -> str:
-    """Format a :class:`TrainDetail` as a Markdown string.
-
-    Args:
-        detail: The :class:`TrainDetail` to render.
-
-    Returns:
-        Multi-line Markdown-formatted string including the stop table.
-    """
+    """Format a :class:`TrainDetail` as a compact, mobile-friendly Markdown string."""
     lines: list[str] = []
 
+    emoji = _train_type_emoji(detail.train_type)
     title = detail.title or f"Train {detail.tid}"
-    lines.append(f"🚂 **{title}**")
+    lines.append(f"{emoji} **{title}**")
 
+    meta: list[str] = []
     if detail.train_number:
-        lines.append(f"Train **#{detail.train_number}**  {detail.train_type}".rstrip())
-
+        meta.append(f"#{detail.train_number}")
+    if detail.train_type:
+        meta.append(detail.train_type)
     if detail.operating_days:
-        lines.append(f"📅 Runs: {detail.operating_days}")
-
-    if detail.origin or detail.destination:
-        lines.append(f"🛤 {detail.origin or '?'} → {detail.destination or '?'}")
+        meta.append(f"📅 {detail.operating_days}")
+    if meta:
+        lines.append(" · ".join(meta))
 
     if detail.depart_time or detail.arrive_time:
-        lines.append(
-            f"🕐 Departs **{detail.depart_time}**  |  Arrives **{detail.arrive_time}**"
-            + (f"  ({detail.duration})" if detail.duration else "")
-        )
+        dep = detail.depart_time or "?"
+        arr = detail.arrive_time or "?"
+        dur = f"  ⏱ {detail.duration}" if detail.duration else ""
+        lines.append(f"🕐 {dep} → {arr}{dur}")
 
     if detail.stops:
-        lines.append(f"\n**Schedule — {len(detail.stops)} stops:**")
-        for stop in detail.stops:
-            dep = stop.departure or stop.arrival
-            live = f"  _{stop.live_status}_" if stop.live_status else ""
-            lines.append(f"  • {stop.name}  `{dep}`{live}")
+        lines.append("")
+        total = len(detail.stops)
+        for idx, stop in enumerate(detail.stops):
+            if idx == 0:
+                icon = "🟢"
+            elif idx == total - 1:
+                icon = "🔴"
+            else:
+                icon = "⚪"
+            time_str = stop.departure or stop.arrival or "—"
+            live = f"  ⚡{stop.live_status}" if stop.live_status else ""
+            lines.append(f"{icon} `{time_str}` **{stop.name}**{live}")
 
     return "\n".join(lines)
 
@@ -347,10 +386,16 @@ async def handle_search(event: NewMessage.Event) -> None:
     """
     uid: int = event.sender_id
     _state[uid] = {"step": "from"}
+    try:
+        await _ensure_session()
+    except Exception:
+        log.error(traceback.format_exc())
+        await event.respond("⚠️ Could not load station data — please try again later.")
+        return
+    kb = _station_keyboard()
     await event.respond(
-        "🛤 **Where are you travelling FROM?**\n"
-        "Pick a station below, or type a station name:",
-        buttons=_station_keyboard(),
+        "🛤 **Where are you travelling FROM?**\nPick a station below, or type a station name:",
+        buttons=kb or None,
         parse_mode="md",
     )
 
@@ -366,9 +411,7 @@ async def handle_details(event: NewMessage.Event) -> None:
     status_msg = await event.respond(f"⏳ Fetching schedule for train **{tid}** …", parse_mode="md")
     try:
         await _ensure_session()
-        detail = await asyncio.get_event_loop().run_in_executor(
-            None, rdmns.get_details, tid
-        )
+        detail = await asyncio.get_event_loop().run_in_executor(None, rdmns.get_details, tid)
         await status_msg.edit(
             _fmt_train_detail(detail),
             parse_mode="md",
@@ -470,8 +513,7 @@ async def handle_callback(event: CallbackQuery.Event) -> None:
     if data == "cmd:search":
         _state[uid] = {"step": "from"}
         await event.edit(
-            "🛤 **Where are you travelling FROM?**\n"
-            "Pick a station below, or type a station name:",
+            "🛤 **Where are you travelling FROM?**\nPick a station below, or type a station name:",
             buttons=_station_keyboard(),
             parse_mode="md",
         )
@@ -489,6 +531,33 @@ async def handle_callback(event: CallbackQuery.Event) -> None:
             )
         else:
             await event.answer("No results cached — start a new /search.", alert=True)
+        return
+
+    # ── station page navigation ──────────────────────────────────────────
+    if data.startswith("stp:"):
+        payload = data[4:]
+        if payload == "noop":
+            await event.answer()
+            return
+        page = int(payload)
+        s = _state.get(uid, {})
+        step = s.get("step")
+        if step == "from":
+            heading = (
+                "🛤 **Where are you travelling FROM?**\n"
+                "Pick a station below, or type a station name:"
+            )
+        elif step == "to":
+            from_name = s.get("from_name", "?")
+            heading = (
+                f"✅ From: **{from_name}**\n\n"
+                "🛤 **Where are you travelling TO?**\n"
+                "Pick a station below, or type a station name:"
+            )
+        else:
+            await event.answer("Use /search to start a new search.", alert=True)
+            return
+        await event.edit(heading, buttons=_station_keyboard(page), parse_mode="md")
         return
 
     # ── station selected ──────────────────────────────────────────────────
@@ -527,9 +596,7 @@ async def handle_callback(event: CallbackQuery.Event) -> None:
         await event.edit(f"⏳ Loading schedule for train **{tid}** …", parse_mode="md")
         try:
             await _ensure_session()
-            detail = await asyncio.get_event_loop().run_in_executor(
-                None, rdmns.get_details, tid
-            )
+            detail = await asyncio.get_event_loop().run_in_executor(None, rdmns.get_details, tid)
             await event.edit(
                 _fmt_train_detail(detail),
                 parse_mode="md",
@@ -552,9 +619,7 @@ async def handle_callback(event: CallbackQuery.Event) -> None:
         await event.answer("Refreshing…")
         try:
             await _ensure_session()
-            detail = await asyncio.get_event_loop().run_in_executor(
-                None, rdmns.get_details, tid
-            )
+            detail = await asyncio.get_event_loop().run_in_executor(None, rdmns.get_details, tid)
             await event.edit(
                 _fmt_train_detail(detail),
                 parse_mode="md",
@@ -675,9 +740,7 @@ async def _do_search(event: Any, uid: int, user_state: dict[str, Any]) -> None:
 
     except SessionExpiredError:
         _session_ready = False
-        await event.edit(
-            "⚠️ Session expired — please try /search again."
-        )
+        await event.edit("⚠️ Session expired — please try /search again.")
     except NoTrainsFound:
         await event.edit(
             f"😕 No trains found for **{user_state['from_name']} → "

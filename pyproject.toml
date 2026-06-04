@@ -19,8 +19,12 @@ rdmns-bot = "bot:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = [
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+only-include = ["bot.py", "timetable.py"]
+
+[dependency-groups]
+dev = [
     "pyright>=1.1",
     "ruff>=0.4",
 ]

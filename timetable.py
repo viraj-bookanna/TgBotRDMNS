@@ -127,6 +127,19 @@ def generate_api_key(when: Optional[datetime] = None) -> str:
 
 
 @dataclass
+class Station:
+    """A railway station from the timetable dropdown.
+
+    Attributes:
+        sid: Numeric station ID used by the search API.
+        name: Display name as it appears in the dropdown.
+    """
+
+    sid: int
+    name: str
+
+
+@dataclass
 class TrainSummary:
     """Condensed information about a single train from a search result page.
 
@@ -328,6 +341,33 @@ def _fill_summary_from_block(summary: TrainSummary, block: Tag) -> None:
 # ---------------------------------------------------------------------------
 
 
+def parse_stations(html: str) -> list[Station]:
+    """Parse station ``<option>`` elements from the ``n_timetablenew.php`` page.
+
+    The page contains two identical ``<select>`` dropdowns (origin/destination)
+    each with ~430 stations.  We only need one.
+
+    Args:
+        html: Raw HTML of the timetable landing page.
+
+    Returns:
+        Sorted list of :class:`Station` (by name), excluding the placeholder.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    select = soup.find("select", attrs={"name": "sid1"})
+    if not select:
+        select = soup.find("select")
+    stations: list[Station] = []
+    if select:
+        for opt in select.find_all("option"):
+            val = (opt.get("value") or "").strip()
+            name = opt.get_text(strip=True)
+            if val and val.isdigit() and name:
+                stations.append(Station(sid=int(val), name=name))
+    stations.sort(key=lambda s: s.name.lower())
+    return stations
+
+
 def parse_search_results(html: str) -> list[TrainSummary]:
     """Parse the ``timetablesearch.php`` response HTML into train summaries.
 
@@ -491,6 +531,7 @@ class RdmnsClient:
         self.device_id: str = device_id.strip().lower()
         self.lang: str = lang
         self.timeout: int = timeout
+        self.stations: list[Station] = []
         self._http: requests.Session = requests.Session()
         self._http.headers.update(
             {
@@ -544,6 +585,18 @@ class RdmnsClient:
                 "Bootstrap failed: SESSION OUT.  Check that your system clock is "
                 "accurate (key is based on Sri Lanka local time)."
             )
+
+        # Fetch timetable page to extract the full station list.
+        key = generate_api_key()
+        timetable_resp = self._http.get(
+            f"{BASE_URL}/app/n_timetablenew.php",
+            params={"did": self.device_id, "key": key, "lan": self.lang},
+            timeout=self.timeout,
+        )
+        stations = parse_stations(timetable_resp.text or "")
+        if stations:
+            self.stations = stations
+            log.info("Loaded %d stations from timetable page.", len(stations))
 
     def search_trains(
         self,

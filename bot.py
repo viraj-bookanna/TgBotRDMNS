@@ -46,10 +46,9 @@ from timetable import (
     NoTrainsFound,
     RdmnsClient,
     SessionExpiredError,
+    Station,
     TrainDetail,
     TrainSummary,
-    generate_api_key,
-    SL_TZ,
 )
 
 # ---------------------------------------------------------------------------
@@ -78,31 +77,28 @@ DEVICE_ID: str = os.environ.get("RDMNS_DEVICE_ID", "8b8c5ba96f2d5f5a")
 # Station catalogue
 # ---------------------------------------------------------------------------
 
-#: Name → (station_id, canonical_name)  mapping used in the quick-pick keyboard.
-STATIONS: Final[dict[str, tuple[int, str]]] = {
-    "Colombo Fort":    (500, "Colombo Fort"),
-    "Maradana":        (501, "Maradana"),
-    "Ragama":          (503, "Ragama"),
-    "Gampaha":         (505, "Gampaha"),
-    "Veyangoda":       (507, "Veyangoda"),
-    "Polgahawela":     (42,  "Polgahawela"),
-    "Rambukkana":      (46,  "Rambukkana"),
-    "Kandy":           (50,  "Kandy"),
-    "Peradeniya Jn.":  (51,  "Peradeniya Jn."),
-    "Badulla":         (83,  "Badulla"),
-    "Galle":           (305, "Galle"),
-    "Matara":          (312, "Matara"),
-    "Anuradhapura":    (254, "Anuradhapura"),
-    "Jaffna":          (280, "Jaffna"),
-    "Batticaloa":      (360, "Batticaloa"),
-    "Trincomalee":     (352, "Trincomalee"),
-    "Kurunegala":      (167, "Kurunegala"),
-    "Negombo":         (502, "Negombo"),
-    "Panadura":        (205, "Panadura"),
-    "Kalutara South":  (210, "Kalutara South"),
+#: Popular stations shown in the quick-pick keyboard (subset of the full list).
+_POPULAR_STATION_IDS: Final[set[int]] = {
+    500, 501, 503, 505, 507, 42, 46, 50, 51, 83,
+    305, 312, 254, 280, 360, 352, 167, 502, 205, 210,
 }
 
-_STATION_NAMES: list[str] = sorted(STATIONS)
+#: Full station map: name → Station, populated at bootstrap.
+_all_stations: dict[str, Station] = {}
+#: Sorted names for the quick-pick keyboard.
+_popular_names: list[str] = []
+#: All station names sorted, for text search.
+_all_station_names: list[str] = []
+
+
+def _load_stations(stations: list[Station]) -> None:
+    """Populate the global station lookup tables from a fetched station list."""
+    global _all_stations, _popular_names, _all_station_names
+    _all_stations = {s.name: s for s in stations}
+    _all_station_names = sorted(_all_stations)
+    _popular_names = sorted(
+        [s.name for s in stations if s.sid in _POPULAR_STATION_IDS]
+    )
 
 # ---------------------------------------------------------------------------
 # Telethon client + shared RDMNS client
@@ -139,16 +135,17 @@ _session_ready: bool = False
 
 
 def _station_keyboard() -> list[list[Button]]:
-    """Build a 3-column inline keyboard for the station quick-pick grid.
+    """Build a 3-column inline keyboard for popular stations.
 
     Returns:
         Nested list of :class:`Button` rows accepted by Telethon's ``buttons``
         parameter.
     """
+    names = _popular_names or _all_station_names
     rows: list[list[Button]] = []
-    for i in range(0, len(_STATION_NAMES), 3):
+    for i in range(0, len(names), 3):
         rows.append(
-            [Button.inline(n, data=f"st:{n}") for n in _STATION_NAMES[i : i + 3]]
+            [Button.inline(n, data=f"st:{n}") for n in names[i : i + 3]]
         )
     return rows
 
@@ -189,6 +186,17 @@ def _train_list_keyboard(trains: list[TrainSummary]) -> list[list[Button]]:
         rows.append([Button.inline(label[:50], data=f"tid:{t.tid}")])
     rows.append([Button.inline("🔄 New search", data="cmd:search")])
     return rows
+
+
+def _detail_buttons(tid: int) -> list[list[Button]]:
+    """Build the inline keyboard shown below a train detail message."""
+    return [
+        [
+            Button.inline("🔄 Refresh", data=f"ref:{tid}"),
+            Button.inline("◀ Back to list", data="cmd:back"),
+            Button.inline("🔍 New search", data="cmd:search"),
+        ]
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +286,7 @@ async def _ensure_session() -> None:
 
     This is called lazily before the first search rather than at startup so
     the bot is responsive immediately even if the upstream server is slow.
+    Also populates the dynamic station list on first bootstrap.
 
     Raises:
         SessionExpiredError: Propagated from :meth:`RdmnsClient.bootstrap`.
@@ -286,12 +295,18 @@ async def _ensure_session() -> None:
     if not _session_ready:
         log.info("Bootstrapping RDMNS session …")
         await asyncio.get_event_loop().run_in_executor(None, rdmns.bootstrap)
+        if rdmns.stations:
+            _load_stations(rdmns.stations)
+            log.info("Loaded %d stations.", len(rdmns.stations))
         _session_ready = True
         log.info("RDMNS session ready.")
 
 
 async def _rebootstrap() -> None:
-    """Force a fresh bootstrap (used after :class:`SessionExpiredError`)."""
+    """Force a fresh bootstrap (used after :class:`SessionExpiredError`).
+
+    Also refreshes the dynamic station list.
+    """
     global _session_ready
     _session_ready = False
     await _ensure_session()
@@ -357,7 +372,7 @@ async def handle_details(event: NewMessage.Event) -> None:
         await status_msg.edit(
             _fmt_train_detail(detail),
             parse_mode="md",
-            buttons=[[Button.inline("🔄 New search", data="cmd:search")]],
+            buttons=_detail_buttons(tid),
         )
     except SessionExpiredError:
         await _rebootstrap()
@@ -404,21 +419,25 @@ async def handle_text(event: NewMessage.Event) -> None:
         return
 
     query = text.lower()
-    matches = [n for n in _STATION_NAMES if query in n.lower()]
+    names = _all_station_names or _popular_names
+    matches = [n for n in names if query in n.lower()]
 
     if len(matches) == 1:
         name = matches[0]
-        sid, sname = STATIONS[name]
-        await _assign_station(event, uid, user_state, user_state["step"], sid, sname)
+        st = _all_stations.get(name)
+        if st:
+            await _assign_station(event, uid, user_state, user_state["step"], st.sid, st.name)
+        else:
+            await event.respond("Station not found. Try again.")
     elif len(matches) > 1:
-        buttons = [[Button.inline(n, data=f"st:{n}")] for n in matches[:10]]
+        buttons = [[Button.inline(n, data=f"st:{n}")] for n in matches[:15]]
         await event.respond(
             f'Multiple stations match "{text}" — pick one:',
             buttons=buttons,
         )
     else:
         await event.respond(
-            f'No station matched **"{text}"**.  Try picking from the list:',
+            f'No station matched **"{text}"**.  Try typing a station name or pick from the list:',
             buttons=_station_keyboard(),
             parse_mode="md",
         )
@@ -480,7 +499,9 @@ async def handle_callback(event: CallbackQuery.Event) -> None:
         if step not in ("from", "to"):
             await event.answer("Use /search to start a new search.", alert=True)
             return
-        sid, sname = STATIONS.get(station_name, (0, station_name))
+        st = _all_stations.get(station_name)
+        sid = st.sid if st else 0
+        sname = st.name if st else station_name
         await _assign_station(event, uid, s, step, sid, sname, is_callback=True)
         return
 
@@ -512,12 +533,7 @@ async def handle_callback(event: CallbackQuery.Event) -> None:
             await event.edit(
                 _fmt_train_detail(detail),
                 parse_mode="md",
-                buttons=[
-                    [
-                        Button.inline("◀ Back to list", data="cmd:back"),
-                        Button.inline("🔄 New search", data="cmd:search"),
-                    ]
-                ],
+                buttons=_detail_buttons(tid),
             )
         except SessionExpiredError:
             await _rebootstrap()
@@ -528,6 +544,28 @@ async def handle_callback(event: CallbackQuery.Event) -> None:
         except Exception:
             log.error(traceback.format_exc())
             await event.edit("❌ Something went wrong fetching that train.")
+        return
+
+    # ── refresh train detail ──────────────────────────────────────────────
+    if data.startswith("ref:"):
+        tid = int(data[4:])
+        await event.answer("Refreshing…")
+        try:
+            await _ensure_session()
+            detail = await asyncio.get_event_loop().run_in_executor(
+                None, rdmns.get_details, tid
+            )
+            await event.edit(
+                _fmt_train_detail(detail),
+                parse_mode="md",
+                buttons=_detail_buttons(tid),
+            )
+        except SessionExpiredError:
+            await _rebootstrap()
+            await event.answer("Session expired — try again.", alert=True)
+        except Exception:
+            log.error(traceback.format_exc())
+            await event.answer("Refresh failed.", alert=True)
         return
 
     # Unrecognised callback — acknowledge silently.

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+.python-version
+
+# Virtual environment (managed by uv)
+.venv/
+
+# Environment secrets — NEVER commit
+.env
+
+# Telethon session files
+*.session
+*.session-journal
+
+# Reversing artefacts / old project
+.old
